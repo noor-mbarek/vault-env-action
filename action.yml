@@ -1,0 +1,49 @@
+name: "HashiCorp Vault Env Loader"
+description: "Securely fetch secrets from HashiCorp Vault and export them as environment variables or .env file"
+author: "noor-mbarek"
+branding:
+  color: purple
+  icon: lock
+
+inputs:
+  vault_addr:
+    description: "Vault server address"
+    required: true
+  vault_role_id:
+    description: "Vault AppRole Role ID"
+    required: true
+  vault_secret_id:
+    description: "Vault AppRole Secret ID"
+    required: true
+  vault_path:
+    description: "Vault KV path (e.g. secret/data/my-app)"
+    required: true
+  import_type:
+    description: "How to import secrets (env_file | exported_env_vars)"
+    required: false
+    default: "exported_env_vars"
+  export_path:
+    description: "Path to write .env file (only used if import_type=env_file)"
+    required: false
+    default: "./.env"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y vault jq
+
+    - name: Run fetch script
+      shell: bash
+      env:
+        VAULT_ADDR: ${{ inputs.vault_addr }}
+        VAULT_ROLE_ID: ${{ inputs.vault_role_id }}
+        VAULT_SECRET_ID: ${{ inputs.vault_secret_id }}
+        VAULT_PATH: ${{ inputs.vault_path }}
+        IMPORT_TYPE: ${{ inputs.import_type }}
+        EXPORT_PATH: ${{ inputs.export_path }}
+      run: |
+        bash "${{ github.action_path }}/scripts/fetch_vault_secrets.sh"
