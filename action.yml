@@ -34,7 +34,21 @@ runs:
       shell: bash
       run: |
         sudo apt-get update -y
-        sudo apt-get install -y vault jq
+        sudo apt-get install -y jq
+
+    - name: Install Vault CLI
+      shell: bash
+      run: |
+        set -e
+        VAULT_VERSION="1.18.2"
+        echo "⬇️ Installing Vault CLI v${VAULT_VERSION}..."
+        curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip" -o vault.zip
+        unzip vault.zip >/dev/null
+        sudo mv vault /usr/local/bin/
+        vault --version
+        sudo apt-get update -y && sudo apt-get install -y jq
+        echo "✅ Vault and jq installed."
+
 
     - name: Run fetch script
       shell: bash
