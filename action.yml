@@ -80,9 +80,8 @@ runs:
         echo "🔎 Mount '$MOUNT' detected as KV v$VERSION"
 
         if [[ "$VERSION" == "2" ]]; then
-          # FULL_PATH="${MOUNT}/data/${RELATIVE_PATH}"
           echo "➡️ Using KV v2 path: $VAULT_PATH"
-          DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
+          DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data.data')
         else
           echo "➡️ Using KV v1 path: $VAULT_PATH"
           DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
