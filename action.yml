@@ -1,6 +1,6 @@
 name: "HashiCorp Vault Env Loader"
-description: "Securely fetch secrets from HashiCorp Vault and export them as environment variables or .env file"
-author: "noor-mbarek"
+description: "Securely fetch secrets from HashiCorp Vault and export them as environment variables or a .env file"
+author: "Your Organization"
 branding:
   color: purple
   icon: lock
@@ -16,7 +16,7 @@ inputs:
     description: "Vault AppRole Secret ID"
     required: true
   vault_path:
-    description: "Vault KV path (e.g. secret/data/my-app)"
+    description: "Vault KV path (e.g. secret/dev)"
     required: true
   import_type:
     description: "How to import secrets (env_file | exported_env_vars)"
@@ -40,10 +40,10 @@ runs:
         unzip vault.zip >/dev/null
         sudo mv vault /usr/local/bin/
         vault --version
-        sudo apt-get update -y && sudo apt-get install -y jq
+        sudo apt-get update -y && sudo apt-get install -y jq curl
         echo "✅ Vault and jq installed."
 
-    - name: Fetch Secrets from Vault
+    - name: Fetch Secrets from Vault (auto KV detection)
       shell: bash
       env:
         VAULT_ADDR: ${{ inputs.vault_addr }}
@@ -61,14 +61,22 @@ runs:
           secret_id="$VAULT_SECRET_ID")
 
         export VAULT_TOKEN
-        echo "📦 Fetching secrets from: $VAULT_PATH"
 
-        # Detect KV engine version (v1 vs v2)
-        if vault kv metadata get "$VAULT_PATH" >/dev/null 2>&1; then
-          echo "✅ Detected KV v2 backend"
-          DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data.data')
+        echo "📦 Determining mount and version for path: $VAULT_PATH"
+        # Extract mount point name (everything before first '/')
+        MOUNT=$(echo "$VAULT_PATH" | cut -d'/' -f1)
+        RELATIVE_PATH=$(echo "$VAULT_PATH" | cut -d'/' -f2-)
+
+        # Ask Vault which version that mount uses
+        MOUNT_INFO=$(curl -sH "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq -r --arg M "$MOUNT/" '.data[$M].options.version // "1"')
+        echo "Mount $MOUNT uses KV version: $MOUNT_INFO"
+
+        if [[ "$MOUNT_INFO" == "2" ]]; then
+          FULL_PATH="${MOUNT}/data/${RELATIVE_PATH}"
+          echo "➡️ Using KV v2 path: $FULL_PATH"
+          DATA=$(vault kv get -format=json "$FULL_PATH" | jq -r '.data.data')
         else
-          echo "✅ Detected KV v1 backend"
+          echo "➡️ Using KV v1 path: $VAULT_PATH"
           DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
         fi
 
@@ -88,5 +96,4 @@ runs:
           echo "✅ .env file created successfully."
         fi
 
-        # Cleanup
         unset VAULT_TOKEN
