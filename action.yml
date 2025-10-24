@@ -43,7 +43,7 @@ runs:
         sudo apt-get update -y && sudo apt-get install -y jq curl
         echo "✅ Vault and jq installed."
 
-    - name: Fetch Secrets from Vault (auto KV detection)
+    - name: Fetch Secrets from Vault (universal KV detection)
       shell: bash
       env:
         VAULT_ADDR: ${{ inputs.vault_addr }}
@@ -59,19 +59,27 @@ runs:
         VAULT_TOKEN=$(vault write -field=token auth/approle/login \
           role_id="$VAULT_ROLE_ID" \
           secret_id="$VAULT_SECRET_ID")
-
         export VAULT_TOKEN
 
-        echo "📦 Determining mount and version for path: $VAULT_PATH"
-        # Extract mount point name (everything before first '/')
+        echo "📦 Resolving KV engine for: $VAULT_PATH"
         MOUNT=$(echo "$VAULT_PATH" | cut -d'/' -f1)
         RELATIVE_PATH=$(echo "$VAULT_PATH" | cut -d'/' -f2-)
 
-        # Ask Vault which version that mount uses
-        MOUNT_INFO=$(curl -sH "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq -r --arg M "$MOUNT/" '.data[$M].options.version // "1"')
-        echo "Mount $MOUNT uses KV version: $MOUNT_INFO"
+        # Fetch mount metadata (robust parsing)
+        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq -r '.data')
+        VERSION=$(echo "$RAW_MOUNTS" | jq -r --arg M "${MOUNT}/" '
+          to_entries[]
+          | select(.key|startswith($M))
+          | .value.options.version // "1"
+          ' | head -n 1)
 
-        if [[ "$MOUNT_INFO" == "2" ]]; then
+        if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+          VERSION="1"
+        fi
+
+        echo "🔎 Mount '$MOUNT' detected as KV v$VERSION"
+
+        if [[ "$VERSION" == "2" ]]; then
           FULL_PATH="${MOUNT}/data/${RELATIVE_PATH}"
           echo "➡️ Using KV v2 path: $FULL_PATH"
           DATA=$(vault kv get -format=json "$FULL_PATH" | jq -r '.data.data')
