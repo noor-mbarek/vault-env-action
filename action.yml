@@ -16,7 +16,7 @@ inputs:
     description: "Vault AppRole Secret ID"
     required: true
   vault_path:
-    description: "Vault KV path (e.g. secret/dev or theguestbook/dev)"
+    description: "Vault KV path (e.g. secret/dev)"
     required: true
   import_type:
     description: "How to import secrets (env_file | exported_env_vars)"
@@ -43,7 +43,7 @@ runs:
         sudo apt-get update -y && sudo apt-get install -y jq curl
         echo "✅ Vault and jq installed."
 
-    - name: Fetch Secrets from Vault
+    - name: Fetch Secrets from Vault (universal KV detection)
       shell: bash
       env:
         VAULT_ADDR: ${{ inputs.vault_addr }}
@@ -65,5 +65,43 @@ runs:
         MOUNT=$(echo "$VAULT_PATH" | cut -d'/' -f1)
         RELATIVE_PATH=$(echo "$VAULT_PATH" | cut -d'/' -f2-)
 
-        VERSION=""
-        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" || echo "")
+        # Fetch mount metadata (robust parsing)
+        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq -r '.data')
+        VERSION=$(echo "$RAW_MOUNTS" | jq -r --arg M "${MOUNT}/" '
+          to_entries[]
+          | select(.key|startswith($M))
+          | .value.options.version // "1"
+          ' | head -n 1)
+
+        if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+          VERSION="1"
+        fi
+
+        echo "🔎 Mount '$MOUNT' detected as KV v$VERSION"
+
+        if [[ "$VERSION" == "2" ]]; then
+          # FULL_PATH="${MOUNT}/data/${RELATIVE_PATH}"
+          echo "➡️ Using KV v2 path: $VAULT_PATH"
+          DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
+        else
+          echo "➡️ Using KV v1 path: $VAULT_PATH"
+          DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
+        fi
+
+        if [[ -z "$DATA" || "$DATA" == "null" ]]; then
+          echo "❌ No secrets found at path: $VAULT_PATH"
+          exit 1
+        fi
+
+        if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
+          echo "📤 Exporting secrets as environment variables..."
+          echo "$DATA" | jq -r 'to_entries | .[] | "export \(.key)=\(.value)"' >> "$GITHUB_ENV"
+          echo "✅ Environment variables exported."
+        else
+          echo "📝 Writing secrets to: $EXPORT_PATH"
+          mkdir -p "$(dirname "$EXPORT_PATH")"
+          echo "$DATA" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > "$EXPORT_PATH"
+          echo "✅ .env file created successfully."
+        fi
+
+        unset VAULT_TOKEN
