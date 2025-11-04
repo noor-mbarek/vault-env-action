@@ -97,20 +97,23 @@ runs:
           exit 1
         fi
 
-        # Transform values into strings if convert_types=true
+        # Optional conversion of all types to strings
         if [[ "$CONVERT_TYPES" == "true" ]]; then
           echo "🔄 Converting all values to strings..."
           DATA=$(echo "$DATA" | jq 'with_entries(.value |= tostring)')
         fi
 
+        # jq logic: preserve arrays and objects as JSON strings, quote others safely
+        FORMATTER='to_entries | .[] | "\(.key)=\(.value | if type=="array" or type=="object" then tostring else @sh end)"'
+
         if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
           echo "📤 Exporting secrets as environment variables..."
-          jq -r 'to_entries | .[] | "export \(.key)=\(.value|@sh)"' <<< "$DATA" | sed "s/^export //" >> "$GITHUB_ENV"
+          jq -r "$FORMATTER" <<< "$DATA" | sed "s/^export //" >> "$GITHUB_ENV"
           echo "✅ Environment variables exported."
         else
           echo "📝 Writing secrets to: $EXPORT_PATH"
           mkdir -p "$(dirname "$EXPORT_PATH")"
-          jq -r 'to_entries | .[] | "\(.key)=\(.value|@sh)"' <<< "$DATA" > "$EXPORT_PATH"
+          jq -r "$FORMATTER" <<< "$DATA" > "$EXPORT_PATH"
           echo "✅ .env file created successfully."
         fi
 
