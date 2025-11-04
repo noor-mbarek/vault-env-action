@@ -94,13 +94,15 @@ runs:
 
         if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
           echo "📤 Exporting secrets as environment variables..."
-          echo "$DATA" | jq -r 'to_entries | .[] | "export \(.key)=\(.value)"' >> "$GITHUB_ENV"
+          # Export each key=value safely into GitHub environment
+          jq -r 'to_entries | .[] | "export \(.key)=\(.value|@sh)"' <<< "$DATA" | sed "s/^export //" >> "$GITHUB_ENV"
           echo "✅ Environment variables exported."
         else
           echo "📝 Writing secrets to: $EXPORT_PATH"
           mkdir -p "$(dirname "$EXPORT_PATH")"
-          echo "$DATA" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > "$EXPORT_PATH"
+          # Write a clean .env file with correctly quoted values
+          jq -r 'to_entries | .[] | "\(.key)=\(.value|@sh)"' <<< "$DATA" > "$EXPORT_PATH"
           echo "✅ .env file created successfully."
-        fi
+        fi  
 
         unset VAULT_TOKEN
