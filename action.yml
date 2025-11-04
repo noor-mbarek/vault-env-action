@@ -26,6 +26,10 @@ inputs:
     description: "Path to write .env file (only used if import_type=env_file)"
     required: false
     default: "./.env"
+  convert_types:
+    description: "Transform all values into strings (true | false)"
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -52,6 +56,7 @@ runs:
         VAULT_PATH: ${{ inputs.vault_path }}
         IMPORT_TYPE: ${{ inputs.import_type }}
         EXPORT_PATH: ${{ inputs.export_path }}
+        CONVERT_TYPES: ${{ inputs.convert_types }}
       run: |
         set -euo pipefail
 
@@ -92,17 +97,22 @@ runs:
           exit 1
         fi
 
+        # Transform values into strings if convert_types=true
+        if [[ "$CONVERT_TYPES" == "true" ]]; then
+          echo "🔄 Converting all values to strings..."
+          DATA=$(echo "$DATA" | jq 'with_entries(.value |= tostring)')
+        fi
+
         if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
           echo "📤 Exporting secrets as environment variables..."
-          # Export each key=value safely into GitHub environment
           jq -r 'to_entries | .[] | "export \(.key)=\(.value|@sh)"' <<< "$DATA" | sed "s/^export //" >> "$GITHUB_ENV"
           echo "✅ Environment variables exported."
         else
           echo "📝 Writing secrets to: $EXPORT_PATH"
           mkdir -p "$(dirname "$EXPORT_PATH")"
-          # Write a clean .env file with correctly quoted values
           jq -r 'to_entries | .[] | "\(.key)=\(.value|@sh)"' <<< "$DATA" > "$EXPORT_PATH"
           echo "✅ .env file created successfully."
-        fi  
+        fi
+
 
         unset VAULT_TOKEN
