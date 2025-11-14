@@ -48,7 +48,7 @@ runs:
         else
           echo "✅ Vault already installed: $(vault --version)"
         fi
-        
+
         sudo apt-get update -y && sudo apt-get install -y jq curl
         echo "✅ jq  and curl installed."
 
@@ -112,9 +112,19 @@ runs:
         FORMATTER='to_entries | .[] | "\(.key)=\(.value | if type=="array" or type=="object" then tostring else @sh end)"'
 
         if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
-          echo "📤 Exporting secrets as environment variables..."
-          jq -r "$FORMATTER" <<< "$DATA" | sed "s/^export //" >> "$GITHUB_ENV"
-          echo "✅ Environment variables exported."
+          echo "📤 Exporting environment variables securely..."
+
+          echo "$DATA" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' |
+          while IFS='=' read -r KEY VALUE; do
+
+            # Mask the secret (hidden everywhere)
+            echo "::add-mask::$VALUE"
+
+            # Define env var for next steps
+            echo "$KEY=$VALUE" >> "$GITHUB_ENV"
+          done
+
+          echo "✅ Environment variables exported securely."
         else
           echo "📝 Writing secrets to: $EXPORT_PATH"
           mkdir -p "$(dirname "$EXPORT_PATH")"
