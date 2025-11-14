@@ -129,7 +129,7 @@ runs:
     #############################################
     # FETCH + EXPORT SECRETS
     #############################################
-    - name: Fetch Secrets from Vault
+    - name: Fetch Secrets from Vault (universal KV detection)
       shell: bash
       env:
         VAULT_ADDR: ${{ inputs.vault_addr }}
@@ -142,46 +142,72 @@ runs:
       run: |
         set -euo pipefail
 
-        echo "🔐 Logging into Vault..."
+        echo "🔐 Authenticating with Vault..."
         VAULT_TOKEN=$(vault write -field=token auth/approle/login \
           role_id="$VAULT_ROLE_ID" \
           secret_id="$VAULT_SECRET_ID")
+        export VAULT_TOKEN
 
-        echo "📦 Detecting KV engine..."
+        echo "📦 Resolving KV engine for: $VAULT_PATH"
         MOUNT=$(echo "$VAULT_PATH" | cut -d'/' -f1)
-        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts")
-        VERSION=$(echo "$RAW_MOUNTS" | jq -r --arg M "${MOUNT}/" \
-          '.data | to_entries[] | select(.key|startswith($M)) | .value.options.version // "1"' | head -n 1)
+        RELATIVE_PATH=$(echo "$VAULT_PATH" | cut -d'/' -f2-)
 
-        [[ -z "$VERSION" || "$VERSION" == "null" ]] && VERSION="1"
-        echo "🔎 KV engine: v$VERSION"
+        # Fetch mount metadata (robust parsing)
+        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq -r '.data')
+        VERSION=$(echo "$RAW_MOUNTS" | jq -r --arg M "${MOUNT}/" '
+          to_entries[]
+          | select(.key|startswith($M))
+          | .value.options.version // "1"
+          ' | head -n 1)
+
+        if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+          VERSION="1"
+        fi
+
+        echo "🔎 Mount '$MOUNT' detected as KV v$VERSION"
 
         if [[ "$VERSION" == "2" ]]; then
+          echo "➡️ Using KV v2 path: $VAULT_PATH"
           DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data.data')
         else
+          echo "➡️ Using KV v1 path: $VAULT_PATH"
           DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
         fi
 
-        if [[ "$DATA" == "null" ]]; then
-          echo "❌ No secrets found"
+        if [[ -z "$DATA" || "$DATA" == "null" ]]; then
+          echo "❌ No secrets found at path: $VAULT_PATH"
           exit 1
         fi
 
+        # Optional conversion of all types to strings
         if [[ "$CONVERT_TYPES" == "true" ]]; then
+          echo "🔄 Converting all values to strings..."
           DATA=$(echo "$DATA" | jq 'with_entries(.value |= tostring)')
         fi
 
+        # jq logic: preserve arrays and objects as JSON strings, quote others safely
         FORMATTER='to_entries | .[] | "\(.key)=\(.value | if type=="array" or type=="object" then tostring else @sh end)"'
 
         if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
+          echo "📤 Exporting environment variables securely..."
+
           echo "$DATA" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' |
           while IFS='=' read -r KEY VALUE; do
+
+            # Mask the secret (hidden everywhere)
             echo "::add-mask::$VALUE"
-            echo "$KEY=$VALUE" >> $GITHUB_ENV
+
+            # Define env var for next steps
+            echo "$KEY=$VALUE" >> "$GITHUB_ENV"
           done
-          echo "✔️ Exported secrets into GitHub env (masked)."
+
+          echo "✅ Environment variables exported securely."
         else
+          echo "📝 Writing secrets to: $EXPORT_PATH"
           mkdir -p "$(dirname "$EXPORT_PATH")"
           jq -r "$FORMATTER" <<< "$DATA" > "$EXPORT_PATH"
-          echo "✔️ .env file written."
+          echo "✅ .env file created successfully."
         fi
+
+
+        unset VAULT_TOKEN
