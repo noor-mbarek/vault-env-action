@@ -20,39 +20,116 @@ inputs:
     required: true
   import_type:
     description: "How to import secrets (env_file | exported_env_vars)"
-    required: false
     default: "exported_env_vars"
   export_path:
     description: "Path to write .env file (only used if import_type=env_file)"
-    required: false
     default: "./.env"
   convert_types:
-    description: "Transform all values into strings (true | false)"
-    required: false
+    description: "Transform values to strings (true | false)"
     default: "false"
 
 runs:
   using: "composite"
   steps:
-    - name: Install Vault CLI
+
+    #############################################
+    # OS-AWARE INSTALLATION (Windows + Linux + macOS)
+    #############################################
+    - name: Install Vault, jq, curl (cross-platform)
       shell: bash
       run: |
-        set -e
-        if ! command -v vault &> /dev/null; then
-          VAULT_VERSION="1.18.2"
-          echo "⬇️ Installing Vault CLI v${VAULT_VERSION}..."
-          curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip" -o vault.zip
-          unzip -o -qq vault.zip
-          sudo mv vault /usr/local/bin/
-          echo "✅ Vault v${VAULT_VERSION} installed."
+        set -euo pipefail
+
+        VAULT_VERSION="1.18.2"
+
+        echo "🖥️ Detecting OS..."
+        OS=$(uname -s)
+
+        if [[ "$OS" == "Linux" ]]; then
+          PLATFORM="linux"
+        elif [[ "$OS" == "Darwin" ]]; then
+          PLATFORM="darwin"
         else
-          echo "✅ Vault already installed: $(vault --version)"
+          PLATFORM="windows"
         fi
 
-        sudo apt-get update -y && sudo apt-get install -y jq curl
-        echo "✅ jq  and curl installed."
+        echo "📦 Platform detected: $PLATFORM"
 
-    - name: Fetch Secrets from Vault (universal KV detection)
+        #####################################
+        # WINDOWS INSTALL (PowerShell wrapper)
+        #####################################
+        if [[ "$PLATFORM" == "windows" ]]; then
+          echo "⚙️ Installing on Windows runner..."
+
+          pwsh -Command "
+            Set-StrictMode -Version Latest
+
+            \$vaultCmd = Get-Command vault.exe -ErrorAction SilentlyContinue
+            if (\$vaultCmd) {
+              Write-Host 'Vault already installed.'
+            } else {
+              Write-Host 'Installing Vault...'
+              Invoke-WebRequest -Uri \"https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_windows_amd64.zip\" -OutFile vault.zip
+              Expand-Archive vault.zip -DestinationPath C:\vault -Force
+              Move-Item C:\vault\vault.exe C:\Windows\System32\vault.exe -Force
+            }
+
+            # Install jq
+            \$jqPath = Get-Command jq.exe -ErrorAction SilentlyContinue
+            if (-not \$jqPath) {
+              Write-Host 'Installing jq...'
+              Invoke-WebRequest -Uri \"https://github.com/stedolan/jq/releases/latest/download/jq-win64.exe\" -OutFile C:\Windows\System32\jq.exe
+            }
+
+            # curl exists by default on Windows Server 2022 runner
+            Write-Host 'Windows setup completed.'
+          "
+
+          exit 0
+        fi
+
+        #####################################
+        # LINUX + MAC INSTALL
+        #####################################
+
+        ARCH=$(uname -m)
+        if [[ "$ARCH" == "x86_64" ]]; then ARCH="amd64"; fi
+        if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then ARCH="arm64"; fi
+
+        ZIP="vault_${VAULT_VERSION}_${PLATFORM}_${ARCH}.zip"
+
+        if command -v vault >/dev/null 2>&1; then
+          INSTALLED=$(vault --version | awk '{print $2}' | tr -d 'v')
+          if [[ "$INSTALLED" == "$VAULT_VERSION" ]]; then
+            echo "✅ Vault v$VAULT_VERSION already installed."
+          else
+            echo "⚠️ Vault version mismatch: $INSTALLED != $VAULT_VERSION"
+          fi
+        fi
+
+        if ! command -v vault >/dev/null 2>&1 || [[ "$INSTALLED" != "$VAULT_VERSION" ]]; then
+          echo "⬇️ Downloading Vault: $ZIP"
+          curl -fsSL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/${ZIP}" -o vault.zip
+          unzip -o -qq vault.zip
+          sudo mv vault /usr/local/bin/vault
+          sudo chmod +x /usr/local/bin/vault
+        fi
+
+        echo "⬇️ Installing jq + curl..."
+        if [[ "$PLATFORM" == "linux" ]]; then
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+        else
+          brew install jq || true
+          # curl is built-in to macOS
+        fi
+
+        echo "✔️ Installation done for Unix-based OS."
+
+    #############################################
+    # FETCH + EXPORT SECRETS
+    #############################################
+    - name: Fetch Secrets from Vault
       shell: bash
       env:
         VAULT_ADDR: ${{ inputs.vault_addr }}
@@ -65,72 +142,46 @@ runs:
       run: |
         set -euo pipefail
 
-        echo "🔐 Authenticating with Vault..."
+        echo "🔐 Logging into Vault..."
         VAULT_TOKEN=$(vault write -field=token auth/approle/login \
           role_id="$VAULT_ROLE_ID" \
           secret_id="$VAULT_SECRET_ID")
-        export VAULT_TOKEN
 
-        echo "📦 Resolving KV engine for: $VAULT_PATH"
+        echo "📦 Detecting KV engine..."
         MOUNT=$(echo "$VAULT_PATH" | cut -d'/' -f1)
-        RELATIVE_PATH=$(echo "$VAULT_PATH" | cut -d'/' -f2-)
+        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts")
+        VERSION=$(echo "$RAW_MOUNTS" | jq -r --arg M "${MOUNT}/" \
+          '.data | to_entries[] | select(.key|startswith($M)) | .value.options.version // "1"' | head -n 1)
 
-        # Fetch mount metadata (robust parsing)
-        RAW_MOUNTS=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/sys/mounts" | jq -r '.data')
-        VERSION=$(echo "$RAW_MOUNTS" | jq -r --arg M "${MOUNT}/" '
-          to_entries[]
-          | select(.key|startswith($M))
-          | .value.options.version // "1"
-          ' | head -n 1)
-
-        if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
-          VERSION="1"
-        fi
-
-        echo "🔎 Mount '$MOUNT' detected as KV v$VERSION"
+        [[ -z "$VERSION" || "$VERSION" == "null" ]] && VERSION="1"
+        echo "🔎 KV engine: v$VERSION"
 
         if [[ "$VERSION" == "2" ]]; then
-          echo "➡️ Using KV v2 path: $VAULT_PATH"
           DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data.data')
         else
-          echo "➡️ Using KV v1 path: $VAULT_PATH"
           DATA=$(vault kv get -format=json "$VAULT_PATH" | jq -r '.data')
         fi
 
-        if [[ -z "$DATA" || "$DATA" == "null" ]]; then
-          echo "❌ No secrets found at path: $VAULT_PATH"
+        if [[ "$DATA" == "null" ]]; then
+          echo "❌ No secrets found"
           exit 1
         fi
 
-        # Optional conversion of all types to strings
         if [[ "$CONVERT_TYPES" == "true" ]]; then
-          echo "🔄 Converting all values to strings..."
           DATA=$(echo "$DATA" | jq 'with_entries(.value |= tostring)')
         fi
 
-        # jq logic: preserve arrays and objects as JSON strings, quote others safely
         FORMATTER='to_entries | .[] | "\(.key)=\(.value | if type=="array" or type=="object" then tostring else @sh end)"'
 
         if [[ "$IMPORT_TYPE" == "exported_env_vars" ]]; then
-          echo "📤 Exporting environment variables securely..."
-
           echo "$DATA" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' |
           while IFS='=' read -r KEY VALUE; do
-
-            # Mask the secret (hidden everywhere)
             echo "::add-mask::$VALUE"
-
-            # Define env var for next steps
-            echo "$KEY=$VALUE" >> "$GITHUB_ENV"
+            echo "$KEY=$VALUE" >> $GITHUB_ENV
           done
-
-          echo "✅ Environment variables exported securely."
+          echo "✔️ Exported secrets into GitHub env (masked)."
         else
-          echo "📝 Writing secrets to: $EXPORT_PATH"
           mkdir -p "$(dirname "$EXPORT_PATH")"
           jq -r "$FORMATTER" <<< "$DATA" > "$EXPORT_PATH"
-          echo "✅ .env file created successfully."
+          echo "✔️ .env file written."
         fi
-
-
-        unset VAULT_TOKEN
